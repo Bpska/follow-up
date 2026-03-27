@@ -1,26 +1,94 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0f111a;
+  --foreground: #e2e8f0;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-dm-sans);
+  --font-mono: var(--font-space-mono);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #0f111a;
+    --foreground: #e2e8f0;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+:root {
+  --px-main: 24px;
+}
+
+@media (max-width: 640px) {
+  :root {
+    --px-main: 16px;
   }
 }
 
 body {
-  background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--background);
+  font-family: var(--font-dm-sans), sans-serif;
+  min-height: 100vh;
+}
+
+/* CallTrack Custom Styles */
+::-webkit-scrollbar { width: 5px; } 
+::-webkit-scrollbar-track { background: #1a1d2e; } 
+::-webkit-scrollbar-thumb { background: #374151; border-radius: 10px; }
+
+input, textarea, select { outline: none; }
+
+.btn { cursor: pointer; border: none; border-radius: 8px; font-family: inherit; font-weight: 600; transition: all 0.18s; }
+.btn:hover { opacity: 0.88; transform: translateY(-1px); } 
+.btn:active { transform: translateY(0); }
+
+.card { background: #181b2e; border: 1px solid #252840; border-radius: 14px; padding: 18px; transition: border-color 0.2s; }
+@media (max-width: 480px) { .card { padding: 14px; } }
+.card:hover { border-color: #374180; }
+
+.tag { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; }
+
+.nav-btn { cursor: pointer; border: none; background: none; font-family: inherit; font-size: 14px; font-weight: 500; padding: 8px 18px; border-radius: 8px; transition: all 0.18s; color: #94a3b8; }
+.nav-btn.active { background: #1e2240; color: #f97316; font-weight: 700; } 
+.nav-btn:hover:not(.active) { color: #e2e8f0; background: #1a1d2e; }
+
+.input-field { width: 100%; background: #1a1d2e; border: 1.5px solid #252840; border-radius: 8px; padding: 10px 14px; color: #e2e8f0; font-family: inherit; font-size: 14px; transition: border-color 0.18s; }
+.input-field:focus { border-color: #f97316; } 
+.input-field::placeholder { color: #4b5563; }
+
+.badge-pulse { animation: pulse 2s infinite; } 
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+.toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); color: #fff; padding: 10px 24px; border-radius: 30px; font-size: 14px; font-weight: 600; z-index: 999; animation: slideUp 0.3s ease; white-space: nowrap; }
+@keyframes slideUp { from{opacity:0;transform:translateX(-50%) translateY(20px)} to{opacity:1;transform:translateX(-50%) translateY(0)} }
+
+.status-btn { cursor: pointer; border: 1.5px solid transparent; border-radius: 7px; padding: 4px 10px; font-size: 11px; font-weight: 700; font-family: inherit; transition: all 0.15s; } 
+.status-btn:hover { transform: scale(1.05); }
+
+select option { background: #1a1d2e; }
+
+.overlay { position: fixed; inset: 0; background: #000000dd; z-index: 100; display: flex; align-items: flex-end; justify-content: center; padding: 0; }
+@media (min-width: 641px) { .overlay { align-items: center; padding: 20px; } }
+
+.modal { background: #181b2e; border: 1px solid #252840; border-radius: 20px 20px 0 0; padding: 24px 20px 40px; width: 100%; max-width: 480px; max-height: 92vh; overflow-y: auto; box-shadow: 0 -10px 40px rgba(0,0,0,0.5); }
+@media (min-width: 641px) { .modal { border-radius: 18px; padding: 28px; max-height: 90vh; } }
+
+.caller-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 700; }
+
+.lead-actions { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
+@media (max-width: 420px) { 
+  .lead-actions { position: absolute; bottom: 16px; right: 14px; }
+  .lead-card-content { padding-bottom: 40px; }
 }
