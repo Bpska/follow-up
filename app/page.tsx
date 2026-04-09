@@ -1,75 +1,42 @@
 'use client';
 
 import { useState, useEffect, useCallback } from "react";
+import insforge from "@/lib/insforge";
 
 /* ─────────────────────────────────────────────
    TYPES & CONSTANTS
 ───────────────────────────────────────────── */
-interface Status { label: string; color: string; bg: string; }
-const STATUSES: Record<string, Status> = {
-  new:       { label: "New Lead",       color: "#60a5fa", bg: "#1e3a5f" },
-  called:    { label: "Called",         color: "#f59e0b", bg: "#3d2a00" },
-  followup:  { label: "Follow-up Due",  color: "#f97316", bg: "#3d1a00" },
-  converted: { label: "Converted ✓",   color: "#34d399", bg: "#063d2a" },
-  dead:      { label: "Not Interested", color: "#9ca3af", bg: "#1f2937" },
+interface StatusMeta { label: string; color: string; bg: string; emoji: string; }
+const STATUSES: Record<string, StatusMeta> = {
+  new:       { label: "New Lead",       color: "#60a5fa", bg: "#1e3a5f", emoji: "🆕" },
+  called:    { label: "Called",         color: "#f59e0b", bg: "#3d2a00", emoji: "📞" },
+  followup:  { label: "Follow-up Due",  color: "#f97316", bg: "#3d1a00", emoji: "🔔" },
+  converted: { label: "Converted",     color: "#34d399", bg: "#063d2a", emoji: "✅" },
+  dead:      { label: "Not Interested", color: "#9ca3af", bg: "#1f2937", emoji: "❌" },
 };
 
-interface Lead {
-  id: string; name: string; company?: string; phone: string;
-  calledBy: string; status: string; followUpDate: string;
-  notes?: string; lastCalled?: string; createdAt: string;
-}
-
-interface UserAccount { name: string; pin: string; isAdmin: boolean; }
+interface DbUser  { id: string; name: string; pin: string; is_admin: boolean; created_at: string; }
+interface DbLead  { id: string; name: string; company?: string; phone: string; place?: string; called_by: string; status: string; follow_up_date: string; notes?: string; last_called?: string; created_at: string; }
+interface Lead    { id: string; name: string; company?: string; phone: string; place?: string; calledBy: string; status: string; followUpDate: string; notes?: string; lastCalled?: string; createdAt: string; }
+interface UserAccount { id?: string; name: string; pin: string; isAdmin: boolean; }
 
 const ADMIN_ACCOUNT: UserAccount = { name: "Admin", pin: "admin123", isAdmin: true };
+const SESSION_KEY = "calltrack-session";
 
-const SESSION_KEY      = "calltrack-session";  // sessionStorage — cleared on tab close
-const LEADS_PREFIX     = "calltrack-leads-";   // localStorage key per user
-const USERS_STORE_KEY  = "calltrack-users";    // localStorage key for user list
-
-/* Default seed users */
-const DEFAULT_USERS: UserAccount[] = [
-  { name: "Ravi",   pin: "1111", isAdmin: false },
-  { name: "Priya",  pin: "2222", isAdmin: false },
-  { name: "Suresh", pin: "3333", isAdmin: false },
-  { name: "Ankita", pin: "4444", isAdmin: false },
-];
-
-/* ── Dynamic user helpers ── */
-function loadStoredUsers(): UserAccount[] {
-  try {
-    const raw = localStorage.getItem(USERS_STORE_KEY);
-    if (raw) return JSON.parse(raw) as UserAccount[];
-  } catch { /* ignore */ }
-  // First time: seed defaults
-  localStorage.setItem(USERS_STORE_KEY, JSON.stringify(DEFAULT_USERS));
-  return DEFAULT_USERS;
+function dbLeadToLead(r: DbLead): Lead {
+  return { id: r.id, name: r.name, company: r.company, phone: r.phone, place: r.place, calledBy: r.called_by, status: r.status, followUpDate: r.follow_up_date, notes: r.notes, lastCalled: r.last_called, createdAt: r.created_at };
 }
-function saveStoredUsers(users: UserAccount[]) {
-  localStorage.setItem(USERS_STORE_KEY, JSON.stringify(users));
-}
-
-/* ── Lead helpers ── */
-function userLeadsKey(name: string) { return LEADS_PREFIX + name.toLowerCase(); }
-function loadUserLeads(name: string): Lead[] {
-  try { return JSON.parse(localStorage.getItem(userLeadsKey(name)) || "[]"); }
-  catch { return []; }
-}
-function saveUserLeads(name: string, leads: Lead[]) {
-  localStorage.setItem(userLeadsKey(name), JSON.stringify(leads));
-}
-function loadAllLeads(users: UserAccount[]): Lead[] {
-  return users.filter(u => !u.isAdmin).flatMap(u => loadUserLeads(u.name));
+function leadToDbRow(l: Lead): Omit<DbLead, 'id'> {
+  return { name: l.name, company: l.company, phone: l.phone, place: l.place, called_by: l.calledBy, status: l.status, follow_up_date: l.followUpDate, notes: l.notes, last_called: l.lastCalled, created_at: l.createdAt };
 }
 
 function todayStr()    { return new Date().toISOString().split("T")[0]; }
 function tomorrowStr() { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().split("T")[0]; }
 function isOverdue(d?: string)  { return d && d < todayStr(); }
 function isDueToday(d?: string) { return d === todayStr(); }
-function formatDate(dateStr: string) {
-  if (!dateStr) return "";
-  return new Date(dateStr + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+function fmtDate(s: string) {
+  if (!s) return "";
+  return new Date(s + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" });
 }
 
 const AVATAR_COLORS = ["#f97316","#60a5fa","#34d399","#a78bfa","#f59e0b","#f87171","#38bdf8"];
@@ -78,169 +45,157 @@ function avatarColor(name: string) {
   let h = 0; for (let i = 0; i < name.length; i++) h += name.charCodeAt(i);
   return AVATAR_COLORS[h % AVATAR_COLORS.length];
 }
+function initials(name: string) { return name ? name[0].toUpperCase() : "?"; }
+
+/* ── Avatar circle ── */
+function Avatar({ name, size = 36 }: { name: string; size?: number }) {
+  const c = avatarColor(name);
+  return (
+    <div style={{ width: size, height: size, borderRadius: "50%", background: c, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.4, fontWeight: 700, flexShrink: 0 }}>
+      {initials(name)}
+    </div>
+  );
+}
 
 /* ═══════════════════════════════════════════
    LOGIN SCREEN
 ═══════════════════════════════════════════ */
-function LoginScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
-  const [users, setUsers] = useState<UserAccount[]>([]);
+function LoginScreen({ onLogin, dbUsers }: { onLogin: (u: UserAccount) => void; dbUsers: UserAccount[] }) {
   const [selected, setSelected] = useState<UserAccount | null>(null);
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
   const [showPin, setShowPin] = useState(false);
-  // New user creation
   const [showAddForm, setShowAddForm] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPin, setNewPin] = useState("");
+  const [addAdminPwd, setAddAdminPwd] = useState("");
   const [addError, setAddError] = useState("");
-  // Admin login panel
+  const [adding, setAdding] = useState(false);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [adminPwd, setAdminPwd] = useState("");
   const [adminError, setAdminError] = useState("");
-  const [showAdminPwd, setShowAdminPwd] = useState(false);
-
-  useEffect(() => {
-    setUsers(loadStoredUsers());
-  }, []);
 
   const handleLogin = () => {
     if (!selected) return;
-    if (selected.pin !== pin) { setError("❌ Wrong PIN. Try again."); setPin(""); return; }
+    if (selected.pin !== pin) { setError("❌ Wrong PIN"); setPin(""); return; }
     onLogin(selected);
   };
 
-  const handleAddUser = () => {
-    const trimmed = newName.trim();
-    const trimmedPin = newPin.trim();
-    if (!trimmed) { setAddError("Please enter a name."); return; }
-    if (trimmedPin.length < 4) { setAddError("PIN must be at least 4 characters."); return; }
-    if (users.find(u => u.name.toLowerCase() === trimmed.toLowerCase())) {
-      setAddError("A user with that name already exists."); return;
-    }
-    const newUser: UserAccount = { name: trimmed, pin: trimmedPin, isAdmin: false };
-    const updated = [...users, newUser];
-    saveStoredUsers(updated);
-    setUsers(updated);
-    setSelected(newUser);
-    setPin("");
-    setShowAddForm(false);
-    setNewName(""); setNewPin(""); setAddError("");
+  const handleAddUser = async () => {
+    const trimmed = newName.trim(); const trimmedPin = newPin.trim();
+    if (!trimmed) { setAddError("Enter a name"); return; }
+    if (trimmedPin.length < 4) { setAddError("PIN must be at least 4 chars"); return; }
+    if (addAdminPwd !== ADMIN_ACCOUNT.pin) { setAddError("❌ Wrong admin password"); return; }
+    if (dbUsers.find(u => u.name.toLowerCase() === trimmed.toLowerCase())) { setAddError("Name already exists"); return; }
+    setAdding(true);
+    const { data, error: e } = await insforge.database.from('app_users').insert([{ name: trimmed, pin: trimmedPin, is_admin: false }]).select();
+    setAdding(false);
+    if (e || !data?.length) { setAddError("Failed to create. Try again."); return; }
+    const raw = data[0] as DbUser;
+    onLogin({ id: raw.id, name: raw.name, pin: raw.pin, isAdmin: raw.is_admin });
+    setShowAddForm(false); setNewName(""); setNewPin(""); setAddAdminPwd(""); setAddError("");
   };
 
   const handleAdminLogin = () => {
-    if (adminPwd !== ADMIN_ACCOUNT.pin) { setAdminError("❌ Wrong admin password."); setAdminPwd(""); return; }
+    if (adminPwd !== ADMIN_ACCOUNT.pin) { setAdminError("❌ Wrong password"); setAdminPwd(""); return; }
     onLogin(ADMIN_ACCOUNT);
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#0f111a", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "24px", fontFamily: "var(--font-dm-sans), sans-serif" }}>
+    <div className="login-wrap">
       {/* Logo */}
-      <div style={{ marginBottom: 32, textAlign: "center" }}>
-        <div style={{ width: 64, height: 64, background: "linear-gradient(135deg,#f97316,#fb923c)", borderRadius: 18, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 30, margin: "0 auto 12px" }}>📞</div>
-        <div style={{ fontFamily: "var(--font-space-mono), monospace", fontWeight: 700, fontSize: 24, color: "#f1f5f9" }}>CallTrack</div>
-        <div style={{ fontSize: 13, color: "#4b5563", marginTop: 4 }}>Cold Call Command Center</div>
+      <div style={{ textAlign: "center", marginBottom: 32 }}>
+        <div style={{ width: 72, height: 72, background: "linear-gradient(135deg,#f97316,#fb923c)", borderRadius: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 34, margin: "0 auto 14px", boxShadow: "0 12px 40px rgba(249,115,22,0.35)" }}>📞</div>
+        <div style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 26, color: "#f1f5f9", letterSpacing: -0.5 }}>CallTrack</div>
+        <div style={{ fontSize: 13, color: "var(--text-dim)", marginTop: 4 }}>Cold Call Command Center</div>
       </div>
 
-      <div style={{ background: "#181b2e", border: "1px solid #252840", borderRadius: 20, padding: "28px 24px", width: "100%", maxWidth: 420, boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}>
-        <h2 style={{ fontFamily: "var(--font-space-mono), monospace", color: "#f1f5f9", fontSize: 16, marginBottom: 6 }}>👋 Who are you?</h2>
-        <p style={{ fontSize: 13, color: "#6b7280", marginBottom: 20 }}>Select your name or add a new one</p>
+      <div className="login-card">
+        <div style={{ fontSize: 17, fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>👋 Who are you?</div>
+        <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 20 }}>Select your name to login</div>
 
-        {/* ── User buttons ── */}
+        {/* User buttons */}
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
-          {users.map(u => {
-            const color = avatarColor(u.name);
-            const sel = selected?.name === u.name;
+          {dbUsers.map(u => {
+            const c = avatarColor(u.name); const sel = selected?.name === u.name;
             return (
               <button key={u.name} className="btn"
-                onClick={() => { setSelected(u); setPin(""); setError(""); setShowAddForm(false); }}
-                style={{ padding: "10px 16px", fontSize: 13, background: sel ? color : "#1e2240", color: sel ? "#fff" : "#94a3b8", border: `1.5px solid ${sel ? color : "#252840"}`, display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ width: 22, height: 22, borderRadius: "50%", background: sel ? "rgba(255,255,255,0.28)" : color, color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, flexShrink: 0 }}>{u.name[0]}</span>
+                onClick={() => { setSelected(u); setPin(""); setError(""); setShowAddForm(false); setShowAdminLogin(false); }}
+                style={{ padding: "9px 14px", fontSize: 13, background: sel ? c + "33" : "var(--bg-raised)", color: sel ? c : "var(--text-muted)", border: `1.5px solid ${sel ? c : "var(--border)"}`, gap: 8 }}>
+                <Avatar name={u.name} size={24} />
                 {u.name}
               </button>
             );
           })}
-
-          {/* + Add Name button */}
-          <button className="btn"
-            onClick={() => { setShowAddForm(true); setSelected(null); setPin(""); setError(""); }}
-            style={{ padding: "10px 16px", fontSize: 13, background: showAddForm ? "#1e3a5f" : "#1e2240", color: showAddForm ? "#60a5fa" : "#6b7280", border: `1.5px dashed ${showAddForm ? "#60a5fa" : "#374151"}`, display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 16, lineHeight: 1 }}>＋</span> Add Name
+          <button className="btn" onClick={() => { setShowAddForm(true); setSelected(null); setShowAdminLogin(false); }}
+            style={{ padding: "9px 14px", fontSize: 13, background: showAddForm ? "#1e3a5f33" : "var(--bg-raised)", color: showAddForm ? "#60a5fa" : "var(--text-dim)", border: `1.5px dashed ${showAddForm ? "#60a5fa" : "var(--border)"}` }}>
+            ＋ Add
           </button>
         </div>
 
-        {/* ── Add new user form ── */}
+        {/* Add user form */}
         {showAddForm && (
-          <div style={{ background: "#0f111a", border: "1px solid #1e3a5f", borderRadius: 12, padding: "16px", marginBottom: 16 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#60a5fa", marginBottom: 12 }}>➕ Create New Team Member</div>
+          <div style={{ background: "var(--bg-base)", border: "1px solid #1e3a5f", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#60a5fa", marginBottom: 12 }}>➕ New Team Member</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <input className="input-field" placeholder="Full name (e.g. Kiran)" value={newName}
-                onChange={e => { setNewName(e.target.value); setAddError(""); }} autoFocus />
-              <input className="input-field" placeholder="Set a PIN (min 4 chars)" value={newPin}
-                onChange={e => { setNewPin(e.target.value); setAddError(""); }} />
-              {addError && <div style={{ color: "#ef4444", fontSize: 12, fontWeight: 600 }}>{addError}</div>}
+              <input className="input-field" placeholder="Full name" value={newName} onChange={e => { setNewName(e.target.value); setAddError(""); }} autoFocus />
+              <input className="input-field" placeholder="Set a PIN (min 4 chars)" value={newPin} onChange={e => { setNewPin(e.target.value); setAddError(""); }} />
+              <input className="input-field" type="password" placeholder="Admin password" value={addAdminPwd} onChange={e => { setAddAdminPwd(e.target.value); setAddError(""); }} />
+              {addError && <div style={{ color: "var(--red)", fontSize: 12, fontWeight: 600 }}>{addError}</div>}
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn" onClick={() => { setShowAddForm(false); setNewName(""); setNewPin(""); setAddError(""); }}
-                  style={{ flex: 1, background: "#1e2240", color: "#94a3b8", padding: "10px" }}>Cancel</button>
-                <button className="btn" onClick={handleAddUser}
-                  style={{ flex: 2, background: "linear-gradient(135deg,#3b82f6,#2563eb)", color: "#fff", padding: "10px", fontSize: 14 }}>
-                  ✓ Create &amp; Select
+                <button className="btn" onClick={() => { setShowAddForm(false); setNewName(""); setNewPin(""); setAddAdminPwd(""); setAddError(""); }} style={{ flex: 1, background: "var(--bg-raised)", color: "var(--text-muted)", padding: "11px" }}>Cancel</button>
+                <button className="btn" onClick={handleAddUser} disabled={adding} style={{ flex: 2, background: "linear-gradient(135deg,#3b82f6,#2563eb)", color: "#fff", padding: "11px", fontSize: 14 }}>
+                  {adding ? "Creating…" : "✓ Create"}
                 </button>
               </div>
             </div>
           </div>
         )}
 
-        {/* ── PIN login for selected regular user ── */}
+        {/* PIN entry */}
         {selected && !showAddForm && (
-          <>
-            <label style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 6 }}>
-              Enter PIN for {selected.name}
-            </label>
-            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <div style={{ marginBottom: 4 }}>
+            <label className="field-label">PIN for {selected.name}</label>
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
               <input className="input-field" type={showPin ? "text" : "password"} placeholder="Enter PIN"
                 value={pin} onChange={e => { setPin(e.target.value); setError(""); }}
                 onKeyDown={e => e.key === "Enter" && handleLogin()} autoFocus />
-              <button className="btn" type="button" onClick={() => setShowPin(!showPin)}
-                style={{ background: "#1e2240", color: "#94a3b8", padding: "0 14px", flexShrink: 0, fontSize: 16 }}>
+              <button className="btn" onClick={() => setShowPin(!showPin)} style={{ background: "var(--bg-raised)", color: "var(--text-muted)", padding: "0 14px", flexShrink: 0, fontSize: 17 }}>
                 {showPin ? "🙈" : "👁️"}
               </button>
             </div>
-            {error && <div style={{ color: "#ef4444", fontSize: 13, marginBottom: 12, fontWeight: 600 }}>{error}</div>}
+            {error && <div style={{ color: "var(--red)", fontSize: 13, marginBottom: 10, fontWeight: 600 }}>{error}</div>}
             <button className="btn" onClick={handleLogin}
-              style={{ width: "100%", background: "linear-gradient(135deg,#f97316,#ea580c)", color: "#fff", padding: "13px", fontSize: 15 }}>
+              style={{ width: "100%", background: "linear-gradient(135deg,#f97316,#ea580c)", color: "#fff", padding: "14px", fontSize: 15, borderRadius: 10, boxShadow: "0 6px 20px rgba(249,115,22,0.3)" }}>
               Login as {selected.name} →
             </button>
-          </>
+          </div>
         )}
 
-        {!selected && !showAddForm && (
-          <div style={{ textAlign: "center", padding: "8px 0", fontSize: 13, color: "#4b5563" }}>↑ Select your name or add a new one above</div>
+        {!selected && !showAddForm && !showAdminLogin && (
+          <div style={{ textAlign: "center", fontSize: 13, color: "var(--text-dim)", padding: "8px 0" }}>↑ Tap your name above</div>
         )}
 
-        {/* ── Admin login link ── */}
-        <div style={{ marginTop: 24, textAlign: "center" }}>
-          <button type="button" onClick={() => { setShowAdminLogin(!showAdminLogin); setAdminPwd(""); setAdminError(""); }}
-            style={{ background: "none", border: "none", cursor: "pointer", color: "#374151", fontSize: 12, textDecoration: "underline", fontFamily: "inherit" }}>
+        {/* Admin link */}
+        <div style={{ marginTop: 20, textAlign: "center" }}>
+          <button type="button" onClick={() => { setShowAdminLogin(!showAdminLogin); setAdminPwd(""); setAdminError(""); setSelected(null); setShowAddForm(false); }}
+            style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-dim)", fontSize: 12, textDecoration: "underline", fontFamily: "inherit" }}>
             🔐 Admin Login
           </button>
         </div>
 
         {showAdminLogin && (
-          <div style={{ marginTop: 12, background: "#1a0a0a", border: "1px solid #ef444430", borderRadius: 12, padding: "16px" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#ef4444", marginBottom: 10 }}>🛡️ Admin Access</div>
+          <div style={{ marginTop: 12, background: "#1a0a0a", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 12, padding: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--red)", marginBottom: 10 }}>🛡️ Admin Access</div>
             <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-              <input className="input-field" type={showAdminPwd ? "text" : "password"} placeholder="Admin password"
+              <input className="input-field" type="password" placeholder="Admin password"
                 value={adminPwd} onChange={e => { setAdminPwd(e.target.value); setAdminError(""); }}
                 onKeyDown={e => e.key === "Enter" && handleAdminLogin()} autoFocus />
-              <button className="btn" type="button" onClick={() => setShowAdminPwd(!showAdminPwd)}
-                style={{ background: "#1e2240", color: "#94a3b8", padding: "0 14px", flexShrink: 0, fontSize: 16 }}>
-                {showAdminPwd ? "🙈" : "👁️"}
-              </button>
             </div>
-            {adminError && <div style={{ color: "#ef4444", fontSize: 12, fontWeight: 600, marginBottom: 8 }}>{adminError}</div>}
+            {adminError && <div style={{ color: "var(--red)", fontSize: 12, fontWeight: 600, marginBottom: 8 }}>{adminError}</div>}
             <button className="btn" onClick={handleAdminLogin}
-              style={{ width: "100%", background: "linear-gradient(135deg,#ef4444,#dc2626)", color: "#fff", padding: "11px", fontSize: 14 }}>
-              🔓 Login as Admin
+              style={{ width: "100%", background: "linear-gradient(135deg,#ef4444,#dc2626)", color: "#fff", padding: "12px", fontSize: 14, borderRadius: 10 }}>
+              🔓 Enter as Admin
             </button>
           </div>
         )}
@@ -254,6 +209,7 @@ function LoginScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
 ═══════════════════════════════════════════ */
 export default function Home() {
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
+  const [dbUsers, setDbUsers] = useState<UserAccount[]>([]);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [view, setView] = useState("today");
   const [editLead, setEditLead] = useState<Lead | null>(null);
@@ -261,244 +217,195 @@ export default function Home() {
   const [search, setSearch] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [toast, setToast] = useState<{ msg: string; color: string } | null>(null);
-  const [weeklyThreshold, setWeeklyThreshold] = useState("");
 
-  /* ── Restore session ── */
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      const raw = sessionStorage.getItem(SESSION_KEY);
-      if (raw) {
-        try {
-          const user = JSON.parse(raw) as UserAccount;
-          setCurrentUser(user);
-          const l = user.isAdmin ? loadAllLeads(loadStoredUsers()) : loadUserLeads(user.name);
-          setLeads(l);
-        } catch { /* ignore */ }
-      }
-      setWeeklyThreshold(new Date(Date.now() - 7 * 864e5).toISOString().split("T")[0]);
-      setLoaded(true);
-    }, 0);
-    return () => clearTimeout(timer);
+  const showToast = (msg: string, color = "var(--orange)") => {
+    setToast({ msg, color }); setTimeout(() => setToast(null), 2500);
+  };
+
+  const fetchLeads = useCallback(async (user: UserAccount) => {
+    let q = insforge.database.from('leads').select();
+    if (!user.isAdmin) q = q.eq('called_by', user.name);
+    const { data } = await q.order('created_at', { ascending: false });
+    setLeads((data as DbLead[] || []).map(dbLeadToLead));
   }, []);
 
-  const handleLogin = (user: UserAccount) => {
+  useEffect(() => {
+    const init = async () => {
+      const { data } = await insforge.database.from('app_users').select().eq('is_admin', false).order('created_at', { ascending: true });
+      setDbUsers((data as DbUser[] || []).map(u => ({ id: u.id, name: u.name, pin: u.pin, isAdmin: u.is_admin })));
+      const raw = sessionStorage.getItem(SESSION_KEY);
+      if (raw) {
+        try { const user = JSON.parse(raw) as UserAccount; setCurrentUser(user); await fetchLeads(user); } catch { /**/ }
+      }
+      setLoaded(true);
+    };
+    init();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleLogin = async (user: UserAccount) => {
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(user));
     setCurrentUser(user);
-    const l = user.isAdmin ? loadAllLeads(loadStoredUsers()) : loadUserLeads(user.name);
-    setLeads(l);
-    showToast(`✅ Welcome back, ${user.name}!`, "#34d399");
+    await fetchLeads(user);
+    showToast(`✅ Welcome, ${user.name}!`, "var(--green)");
+    setDbUsers(prev => prev.find(u => u.name === user.name) ? prev : [...prev, user]);
   };
 
   const handleLogout = () => {
     sessionStorage.removeItem(SESSION_KEY);
-    setCurrentUser(null);
-    setLeads([]);
-    setView("today");
+    setCurrentUser(null); setLeads([]); setView("today");
   };
 
-  /* ── Save (scoped to current user) ── */
-  const save = useCallback((newLeads: Lead[], user: UserAccount | null) => {
-    if (!user) return;
-    setLeads(newLeads);
-    if (!user.isAdmin) {
-      // Regular user: save only their own leads
-      saveUserLeads(user.name, newLeads);
-    } else {
-      // Admin edited a lead: persist to the original owner's store
-      // Group by calledBy and save each group
-      const nonAdminUsers = loadStoredUsers().filter(u => !u.isAdmin).map(u => u.name);
-      const byUser: Record<string, Lead[]> = {};
-      nonAdminUsers.forEach(n => { byUser[n] = []; });
-      newLeads.forEach(l => {
-        const owner = nonAdminUsers.find(n => n.toLowerCase() === l.calledBy?.toLowerCase());
-        if (owner) byUser[owner].push(l);
-        else if (byUser["Ravi"]) byUser["Ravi"].push(l); // fallback
-      });
-      nonAdminUsers.forEach(n => saveUserLeads(n, byUser[n]));
-    }
-  }, []);
-
-  const showToast = (msg: string, color = "#f97316") => {
-    setToast({ msg, color }); setTimeout(() => setToast(null), 2500);
-  };
-
-  const addOrUpdateLead = (lead: Lead) => {
+  const addOrUpdateLead = async (lead: Lead) => {
     if (!currentUser) return;
-    let updated: Lead[];
     if (lead.id) {
-      updated = leads.map(l => l.id === lead.id ? lead : l);
-      showToast("Lead updated!");
+      const { error } = await insforge.database.from('leads').update(leadToDbRow(lead)).eq('id', lead.id);
+      if (error) { showToast("❌ Update failed", "var(--red)"); return; }
+      setLeads(prev => prev.map(l => l.id === lead.id ? lead : l));
+      showToast("✅ Lead updated");
     } else {
-      const newLead: Lead = { ...lead, id: Date.now().toString(), createdAt: todayStr() };
-      // For regular users, always set calledBy to themselves
-      if (!currentUser.isAdmin) newLead.calledBy = currentUser.name;
-      updated = [newLead, ...leads];
-      showToast("Lead added!");
+      const row = { ...leadToDbRow(lead), called_by: currentUser.isAdmin ? lead.calledBy : currentUser.name, created_at: todayStr() };
+      const { data, error } = await insforge.database.from('leads').insert([row]).select();
+      if (error || !data?.length) { showToast("❌ Failed to add", "var(--red)"); return; }
+      setLeads(prev => [dbLeadToLead(data[0] as DbLead), ...prev]);
+      showToast("✅ Lead added");
     }
-    save(updated, currentUser);
     setShowForm(false); setEditLead(null);
   };
 
-  const deleteLead = (id: string) => {
+  const deleteLead = async (id: string) => {
     if (!currentUser) return;
-    if (!window.confirm("Delete this lead permanently?")) return;
-    const updated = leads.filter(l => l.id !== id);
-    save(updated, currentUser);
-    showToast("Lead deleted.", "#ef4444");
+    if (!window.confirm("Delete this lead?")) return;
+    const { error } = await insforge.database.from('leads').delete().eq('id', id);
+    if (error) { showToast("❌ Delete failed", "var(--red)"); return; }
+    setLeads(prev => prev.filter(l => l.id !== id));
+    showToast("Deleted", "var(--red)");
   };
 
-  const markStatus = (id: string, status: string) => {
-    if (!currentUser) return;
-    const updated = leads.map(l => {
-      if (l.id !== id) return l;
-      const u: Partial<Lead> = { status };
-      if (status === "called") u.lastCalled = todayStr();
-      if (status === "followup") u.followUpDate = tomorrowStr();
-      return { ...l, ...u };
-    });
-    save(updated, currentUser);
+  const markStatus = async (id: string, status: string) => {
+    const updates: Partial<DbLead> = { status };
+    if (status === "called") updates.last_called = todayStr();
+    if (status === "followup") updates.follow_up_date = tomorrowStr();
+    const { error } = await insforge.database.from('leads').update(updates).eq('id', id);
+    if (error) { showToast("❌ Failed", "var(--red)"); return; }
+    setLeads(prev => prev.map(l => l.id !== id ? l : {
+      ...l, status,
+      ...(status === "called" ? { lastCalled: todayStr() } : {}),
+      ...(status === "followup" ? { followUpDate: tomorrowStr() } : {}),
+    }));
   };
 
-  /* ── Derived data ── */
+  const handleDeleteUser = async (userName: string) => {
+    if (!window.confirm(`Delete ${userName} and ALL their leads?`)) return;
+    await insforge.database.from('leads').delete().eq('called_by', userName);
+    const { error } = await insforge.database.from('app_users').delete().eq('name', userName);
+    if (error) { showToast("❌ Failed", "var(--red)"); return; }
+    setDbUsers(prev => prev.filter(u => u.name !== userName));
+    if (currentUser?.isAdmin) setLeads(prev => prev.filter(l => l.calledBy !== userName));
+    showToast(`Deleted ${userName}`, "var(--red)");
+  };
+
+  /* Derived */
+  const weekThresh   = new Date(Date.now() - 7 * 864e5).toISOString().split("T")[0];
   const todayLeads   = leads.filter(l => isDueToday(l.followUpDate) || (isOverdue(l.followUpDate) && l.status !== "converted" && l.status !== "dead"));
-  const weeklyLeads  = leads.filter(l => l.createdAt >= weeklyThreshold);
-  const filteredAll  = leads.filter(l => {
-    const q = search.toLowerCase();
-    return !q || l.name?.toLowerCase().includes(q) || l.company?.toLowerCase().includes(q) || l.phone?.includes(q) || l.calledBy?.toLowerCase().includes(q);
-  });
+  const weekLeads    = leads.filter(l => l.createdAt >= weekThresh);
+  const filteredAll  = leads.filter(l => { const q = search.toLowerCase(); return !q || l.name?.toLowerCase().includes(q) || l.company?.toLowerCase().includes(q) || l.phone?.includes(q) || l.calledBy?.toLowerCase().includes(q); });
 
-  /* ── Loading / auth gates ── */
-  if (!loaded) return <div style={{ color: "#fff", padding: 40, fontFamily: "sans-serif" }}>Loading...</div>;
-  if (!currentUser) return <LoginScreen onLogin={handleLogin} />;
+  if (!loaded) return (
+    <div style={{ minHeight: "100dvh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg-base)", flexDirection: "column", gap: 16 }}>
+      <div style={{ fontSize: 40 }}>📞</div>
+      <div style={{ color: "var(--text-muted)", fontSize: 14, fontWeight: 600 }}>Connecting…</div>
+    </div>
+  );
+  if (!currentUser) return <LoginScreen onLogin={handleLogin} dbUsers={dbUsers} />;
 
   const isAdmin = currentUser.isAdmin;
+  const converted = leads.filter(l => l.status === "converted").length;
 
   return (
-    <div style={{ minHeight: "100vh", background: "#0f111a", fontFamily: "var(--font-dm-sans), sans-serif", color: "#e2e8f0" }}>
-
-      {/* ── Header ── */}
-      <div style={{ background: "#0d0f1a", borderBottom: "1px solid #1e2240", padding: "12px var(--px-main)", display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 50, flexWrap: "wrap", gap: 10 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ width: 36, height: 36, background: "linear-gradient(135deg,#f97316,#fb923c)", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>📞</div>
-          <div>
-            <div style={{ fontFamily: "var(--font-space-mono), monospace", fontWeight: 700, fontSize: 16, color: "#f1f5f9" }}>CallTrack</div>
-            <div style={{ fontSize: 11, color: "#4b5563", fontWeight: 500 }}>Cold Call Command Center</div>
-          </div>
+    <div className="app-shell">
+      {/* ── Top Bar ── */}
+      <header className="top-bar">
+        <div style={{ width: 36, height: 36, background: "linear-gradient(135deg,#f97316,#fb923c)", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0, boxShadow: "0 4px 14px rgba(249,115,22,0.3)" }}>📞</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 15, color: "var(--text-primary)", lineHeight: 1.2 }}>CallTrack</div>
+          <div style={{ fontSize: 10, color: "var(--text-dim)", fontWeight: 600 }}>COMMAND CENTER</div>
         </div>
-
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          {/* Current user badge */}
-          <div style={{ display: "flex", alignItems: "center", gap: 7, background: isAdmin ? "#ef444420" : avatarColor(currentUser.name) + "22", border: `1px solid ${isAdmin ? "#ef444440" : avatarColor(currentUser.name) + "44"}`, borderRadius: 20, padding: "5px 12px" }}>
-            <span style={{ width: 22, height: 22, borderRadius: "50%", background: isAdmin ? "#ef4444" : avatarColor(currentUser.name), color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700 }}>
-              {currentUser.name[0]}
-            </span>
-            <span style={{ fontSize: 12, color: isAdmin ? "#ef4444" : avatarColor(currentUser.name), fontWeight: 700 }}>
-              {isAdmin ? "🔓 Admin" : currentUser.name}
-            </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {/* User chip */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, background: isAdmin ? "rgba(239,68,68,0.12)" : avatarColor(currentUser.name) + "22", border: `1px solid ${isAdmin ? "rgba(239,68,68,0.3)" : avatarColor(currentUser.name) + "44"}`, borderRadius: 20, padding: "5px 10px" }}>
+            <Avatar name={isAdmin ? "A" : currentUser.name} size={22} />
+            <span style={{ fontSize: 12, color: isAdmin ? "var(--red)" : avatarColor(currentUser.name), fontWeight: 700 }}>{isAdmin ? "Admin" : currentUser.name}</span>
           </div>
-
-          {!isAdmin && (
-            <button className="btn" onClick={() => { setEditLead(null); setShowForm(true); }}
-              style={{ background: "linear-gradient(135deg,#f97316,#ea580c)", color: "#fff", padding: "9px 20px", fontSize: 13 }}>
-              + Add Lead
-            </button>
-          )}
-          <button className="btn" onClick={handleLogout} style={{ background: "#1e2240", color: "#94a3b8", padding: "7px 14px", fontSize: 12 }}>
-            Logout
-          </button>
+          <button className="btn" onClick={handleLogout} style={{ background: "var(--bg-raised)", color: "var(--text-dim)", padding: "7px 12px", fontSize: 12 }}>Out</button>
         </div>
-      </div>
+      </header>
 
-      {/* ── Admin top banner ── */}
+      {/* ── Admin Banner ── */}
       {isAdmin && (
-        <div style={{ background: "linear-gradient(90deg,#3d1a1a,#1a1040)", borderBottom: "1px solid #ef444430", padding: "10px var(--px-main)", display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 18 }}>🛡️</span>
-          <div>
-            <span style={{ color: "#ef4444", fontWeight: 700, fontSize: 13 }}>Admin View — Seeing All Team Leads</span>
-            <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 10 }}>You can view, edit, and manage every team member&apos;s leads.</span>
-          </div>
+        <div className="admin-banner" style={{ top: "var(--header-h)" }}>
+          <span>🛡️</span>
+          <span style={{ color: "var(--red)", fontWeight: 700 }}>Admin</span>
+          <span style={{ color: "var(--text-dim)" }}>— all team leads visible</span>
         </div>
       )}
 
-      {/* ── Stats ── */}
-      <div style={{ display: "flex", gap: 12, padding: "16px var(--px-main)", overflowX: "auto", scrollbarWidth: "none" }}>
-        {[
-          { label: isAdmin ? "All Team Leads" : "My Leads", value: leads.length, icon: "👥", color: "#60a5fa" },
-          { label: "Due Today",  value: todayLeads.length,  icon: "🔔", color: "#f97316", pulse: todayLeads.length > 0 },
-          { label: "Converted", value: leads.filter(l => l.status === "converted").length, icon: "✅", color: "#34d399" },
-          { label: "This Week", value: weeklyLeads.length,  icon: "📅", color: "#a78bfa" },
-        ].map(s => (
-          <div key={s.label} className="card" style={{ flex: "0 0 auto", minWidth: 130, textAlign: "center" }}>
-            <div style={{ fontSize: 22 }}>{s.icon}</div>
-            <div style={{ fontSize: 28, fontWeight: 700, color: s.color, fontFamily: "var(--font-space-mono), monospace" }} className={s.pulse ? "badge-pulse" : ""}>{s.value}</div>
-            <div style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.5 }}>{s.label}</div>
-          </div>
-        ))}
-      </div>
+      {/* ── Content ── */}
+      <main className="content-area" style={{ paddingTop: `calc(var(--header-h) + ${isAdmin ? "40px" : "12px"} + 12px)` }}>
 
-      {/* ── Nav ── */}
-      <div style={{ display: "flex", gap: 4, padding: "0 var(--px-main) 16px", overflowX: "auto", scrollbarWidth: "none" }}>
-        <button className={`nav-btn ${view === "today" ? "active" : ""}`} onClick={() => setView("today")}>
-          🔔 Today&apos;s Follow-ups {todayLeads.length > 0 && <span style={{ background: "#f97316", color: "#fff", borderRadius: 10, padding: "1px 6px", fontSize: 11, marginLeft: 4 }}>{todayLeads.length}</span>}
-        </button>
-        <button className={`nav-btn ${view === "all" ? "active" : ""}`} onClick={() => setView("all")}>📋 All Leads</button>
-        {isAdmin && <button className={`nav-btn ${view === "team" ? "active" : ""}`} onClick={() => setView("team")}>👥 Team Report</button>}
-      </div>
+        {/* Stats */}
+        <div className="stats-row">
+          {[ 
+            { label: isAdmin ? "All Leads" : "My Leads", val: leads.length, accent: "#60a5fa", icon: "👥" },
+            { label: "Due Today",  val: todayLeads.length,  accent: "#f97316", icon: "🔔", pulse: todayLeads.length > 0 },
+            { label: "Converted", val: converted,            accent: "#34d399", icon: "✅" },
+            { label: "This Week", val: weekLeads.length,     accent: "#a78bfa", icon: "📅" },
+          ].map(s => (
+            <div key={s.label} className="stat-card" style={{ "--accent": s.accent } as React.CSSProperties}>
+              <div className="stat-icon">{s.icon}</div>
+              <div className={`stat-val${s.pulse ? " pulse" : ""}`}>{s.val}</div>
+              <div className="stat-label">{s.label}</div>
+            </div>
+          ))}
+        </div>
 
-      <div style={{ padding: "0 var(--px-main) 40px" }}>
+        {/* Views */}
         {view === "today" && <TodayView leads={todayLeads} onEdit={l => { setEditLead(l); setShowForm(true); }} onDelete={deleteLead} onMarkStatus={markStatus} />}
         {view === "all"   && <AllView leads={filteredAll} search={search} setSearch={setSearch} onEdit={l => { setEditLead(l); setShowForm(true); }} onDelete={deleteLead} onMarkStatus={markStatus} isAdmin={isAdmin} />}
-        {view === "team"  && isAdmin && <TeamReport />}
-      </div>
+        {view === "team"  && isAdmin && <TeamReport dbUsers={dbUsers} onDeleteUser={handleDeleteUser} />}
+      </main>
 
-      {showForm && <LeadForm lead={editLead} currentUser={currentUser} onSave={addOrUpdateLead} onClose={() => { setShowForm(false); setEditLead(null); }} />}
+      {/* ── FAB (non-admin only) ── */}
+      {!isAdmin && (
+        <button className="fab" onClick={() => { setEditLead(null); setShowForm(true); }} aria-label="Add Lead">
+          +
+        </button>
+      )}
+
+      {/* ── Bottom Nav ── */}
+      <nav className="bottom-nav">
+        <button className={`bnav-item${view === "today" ? " active" : ""}`} onClick={() => setView("today")}>
+          {todayLeads.length > 0 && <span className="bnav-badge">{todayLeads.length}</span>}
+          <span className="bnav-icon">🔔</span>
+          <span className="bnav-label">Today</span>
+        </button>
+        <button className={`bnav-item${view === "all" ? " active" : ""}`} onClick={() => setView("all")}>
+          <span className="bnav-icon">📋</span>
+          <span className="bnav-label">All Leads</span>
+        </button>
+        {isAdmin && (
+          <button className={`bnav-item${view === "team" ? " active" : ""}`} onClick={() => setView("team")}>
+            <span className="bnav-icon">👥</span>
+            <span className="bnav-label">Team</span>
+          </button>
+        )}
+      </nav>
+
+      {/* ── Lead Form Sheet ── */}
+      {showForm && <LeadForm lead={editLead} currentUser={currentUser} dbUsers={dbUsers} onSave={addOrUpdateLead} onClose={() => { setShowForm(false); setEditLead(null); }} />}
+
+      {/* ── Toast ── */}
       {toast && <div className="toast" style={{ background: toast.color }}>{toast.msg}</div>}
-    </div>
-  );
-}
-
-/* ═══════════════════════════════════════════
-   TEAM REPORT (Admin only)
-═══════════════════════════════════════════ */
-function TeamReport() {
-  const nonAdmins = loadStoredUsers().filter(u => !u.isAdmin);
-  return (
-    <div>
-      <div style={{ marginBottom: 16, fontSize: 14, color: "#94a3b8", fontWeight: 600 }}>📊 Team Performance Overview</div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        {nonAdmins.map(user => {
-          const userLeads = loadUserLeads(user.name);
-          const converted = userLeads.filter(l => l.status === "converted").length;
-          const dueToday  = userLeads.filter(l => isDueToday(l.followUpDate) || (isOverdue(l.followUpDate) && l.status !== "converted" && l.status !== "dead")).length;
-          const color = avatarColor(user.name);
-          return (
-            <div key={user.name} className="card" style={{ borderLeft: `3px solid ${color}` }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-                <div style={{ width: 44, height: 44, borderRadius: "50%", background: color, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 18, color: "#fff" }}>
-                  {user.name[0]}
-                </div>
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: 16, color: "#f1f5f9" }}>{user.name}</div>
-                  <div style={{ fontSize: 12, color: "#6b7280" }}>Team Member</div>
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-                {[
-                  { label: "Total Leads",  value: userLeads.length, color: "#60a5fa" },
-                  { label: "Converted",    value: converted,          color: "#34d399" },
-                  { label: "Due Today",    value: dueToday,           color: "#f97316" },
-                  { label: "Conv. Rate",   value: userLeads.length > 0 ? `${Math.round(converted / userLeads.length * 100)}%` : "—", color: "#a78bfa" },
-                ].map(stat => (
-                  <div key={stat.label} style={{ flex: "1 1 80px", background: "#0f111a", borderRadius: 10, padding: "10px 14px", textAlign: "center" }}>
-                    <div style={{ fontSize: 22, fontWeight: 700, color: stat.color, fontFamily: "var(--font-space-mono), monospace" }}>{stat.value}</div>
-                    <div style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.5, marginTop: 2 }}>{stat.label}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          );
-        })}
-      </div>
     </div>
   );
 }
@@ -506,17 +413,17 @@ function TeamReport() {
 /* ═══════════════════════════════════════════
    TODAY VIEW
 ═══════════════════════════════════════════ */
-function TodayView({ leads, onEdit, onDelete, onMarkStatus }: { leads: Lead[], onEdit: (l: Lead) => void, onDelete: (id: string) => void, onMarkStatus: (id: string, s: string) => void }) {
+function TodayView({ leads, onEdit, onDelete, onMarkStatus }: { leads: Lead[]; onEdit:(l:Lead)=>void; onDelete:(id:string)=>void; onMarkStatus:(id:string,s:string)=>void }) {
   if (!leads.length) return (
-    <div style={{ textAlign: "center", padding: "60px 20px" }}>
-      <div style={{ fontSize: 56, marginBottom: 12 }}>🎉</div>
-      <div style={{ fontSize: 18, fontWeight: 700, color: "#6b7280" }}>No follow-ups due today!</div>
-      <div style={{ fontSize: 13, color: "#4b5563", marginTop: 6 }}>All caught up. Go add some new leads.</div>
+    <div className="empty-state">
+      <div style={{ fontSize: 60 }}>🎉</div>
+      <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text-muted)" }}>All caught up!</div>
+      <div style={{ fontSize: 13, color: "var(--text-dim)" }}>No follow-ups due today.</div>
     </div>
   );
   return (
     <div>
-      <div style={{ marginBottom: 16, fontSize: 13, color: "#6b7280", fontWeight: 600 }}>{leads.length} contact{leads.length !== 1 ? "s" : ""} need attention today</div>
+      <div className="section-title">{leads.length} contact{leads.length !== 1 ? "s" : ""} need attention</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {leads.map(l => <LeadCard key={l.id} lead={l} onEdit={onEdit} onDelete={onDelete} onMarkStatus={onMarkStatus} highlight />)}
       </div>
@@ -528,9 +435,8 @@ function TodayView({ leads, onEdit, onDelete, onMarkStatus }: { leads: Lead[], o
    ALL LEADS VIEW
 ═══════════════════════════════════════════ */
 function AllView({ leads, search, setSearch, onEdit, onDelete, onMarkStatus, isAdmin }: {
-  leads: Lead[], search: string, setSearch: (s: string) => void,
-  onEdit: (l: Lead) => void, onDelete: (id: string) => void,
-  onMarkStatus: (id: string, s: string) => void, isAdmin: boolean
+  leads: Lead[]; search: string; setSearch:(s:string)=>void;
+  onEdit:(l:Lead)=>void; onDelete:(id:string)=>void; onMarkStatus:(id:string,s:string)=>void; isAdmin: boolean;
 }) {
   const [filterStatus, setFilterStatus] = useState("all");
   const [filterCaller, setFilterCaller] = useState("all");
@@ -541,22 +447,22 @@ function AllView({ leads, search, setSearch, onEdit, onDelete, onMarkStatus, isA
   );
   return (
     <div>
-      <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
-        <input className="input-field" style={{ flex: "1 1 200px", maxWidth: 280 }}
-          placeholder="🔍 Name, company, phone, caller..." value={search} onChange={e => setSearch(e.target.value)} />
-        <select className="input-field" style={{ flex: "0 0 auto", width: "auto" }} value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
+      <input className="input-field" style={{ marginBottom: 10 }}
+        placeholder="🔍 Search name, company, phone…" value={search} onChange={e => setSearch(e.target.value)} />
+      <div style={{ display: "flex", gap: 8, marginBottom: 14, overflowX: "auto", scrollbarWidth: "none" }}>
+        <select className="input-field" style={{ flex: "0 0 auto", width: "auto", fontSize: 13, padding: "8px 12px" }} value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
           <option value="all">All Status</option>
-          {Object.entries(STATUSES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+          {Object.entries(STATUSES).map(([k, v]) => <option key={k} value={k}>{v.emoji} {v.label}</option>)}
         </select>
         {isAdmin && callers.length > 0 && (
-          <select className="input-field" style={{ flex: "0 0 auto", width: "auto" }} value={filterCaller} onChange={e => setFilterCaller(e.target.value)}>
+          <select className="input-field" style={{ flex: "0 0 auto", width: "auto", fontSize: 13, padding: "8px 12px" }} value={filterCaller} onChange={e => setFilterCaller(e.target.value)}>
             <option value="all">All Callers</option>
             {callers.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
         )}
       </div>
       {!filtered.length ? (
-        <div style={{ textAlign: "center", padding: "50px 20px" }}><div style={{ fontSize: 40 }}>📭</div><div style={{ fontSize: 16, color: "#6b7280", marginTop: 8 }}>No leads found</div></div>
+        <div className="empty-state"><div style={{ fontSize: 40 }}>📭</div><div style={{ color: "var(--text-muted)" }}>No leads found</div></div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {filtered.map(l => <LeadCard key={l.id} lead={l} onEdit={onEdit} onDelete={onDelete} onMarkStatus={onMarkStatus} />)}
@@ -570,76 +476,96 @@ function AllView({ leads, search, setSearch, onEdit, onDelete, onMarkStatus, isA
    LEAD CARD
 ═══════════════════════════════════════════ */
 function LeadCard({ lead, onEdit, onDelete, onMarkStatus, highlight }: {
-  lead: Lead, onEdit: (l: Lead) => void, onDelete: (id: string) => void,
-  onMarkStatus: (id: string, s: string) => void, highlight?: boolean
+  lead: Lead; onEdit:(l:Lead)=>void; onDelete:(id:string)=>void; onMarkStatus:(id:string,s:string)=>void; highlight?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const status     = STATUSES[lead.status] || STATUSES.new;
-  const overdue    = isOverdue(lead.followUpDate);
-  const dueToday   = isDueToday(lead.followUpDate);
-  const callerColor = avatarColor(lead.calledBy);
+  const st = STATUSES[lead.status] || STATUSES.new;
+  const overdue  = isOverdue(lead.followUpDate);
+  const dueToday = isDueToday(lead.followUpDate);
+  const cc = avatarColor(lead.calledBy || "");
+
+  const borderColor = overdue ? "#7f1d1d" : dueToday ? "#3d2a00" : "var(--border)";
 
   return (
-    <div className="card" style={{ borderColor: highlight ? (overdue ? "#7f1d1d" : "#3d2a00") : undefined, position: "relative" }}>
-      {overdue  && <div style={{ position: "absolute", top: -1, right: 16, background: "#ef4444", color: "#fff", fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: "0 0 6px 6px", letterSpacing: 0.5 }}>OVERDUE</div>}
-      {dueToday && !overdue && <div style={{ position: "absolute", top: -1, right: 16, background: "#f97316", color: "#fff", fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: "0 0 6px 6px", letterSpacing: 0.5 }}>TODAY</div>}
+    <div className="lead-card" style={{ borderColor: highlight ? borderColor : "var(--border)", padding: 0 }}>
+      {/* Urgency ribbon */}
+      {overdue  && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: "var(--red)" }} />}
+      {dueToday && !overdue && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: "var(--orange)" }} />}
 
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-        <div style={{ width: 40, height: 40, borderRadius: 10, background: status.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0, border: `1.5px solid ${status.color}30` }}>
-          {lead.name?.[0]?.toUpperCase() || "?"}
+      {/* Clickable Header Area */}
+      <div onClick={() => setExpanded(!expanded)} style={{ padding: 14, cursor: "pointer", display: "flex", gap: 12, alignItems: "flex-start", userSelect: "none" }}>
+        {/* Avatar */}
+        <div style={{ width: 44, height: 44, borderRadius: 12, background: st.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, fontWeight: 700, color: st.color, flexShrink: 0, border: `1.5px solid ${st.color}33` }}>
+          {(lead.name?.[0] || "?").toUpperCase()}
         </div>
 
-        <div style={{ flex: 1, minWidth: 0 }} className="lead-card-content">
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <span style={{ fontWeight: 700, fontSize: 15, color: "#f1f5f9" }}>{lead.name || "Unnamed"}</span>
-            <span className="tag" style={{ background: status.bg, color: status.color }}>{status.label}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 3 }}>
+            <span style={{ fontWeight: 700, fontSize: 15, color: "var(--text-primary)" }}>{lead.name || "Unnamed"}</span>
+            <span className="lead-tag" style={{ background: st.bg, color: st.color }}>{st.emoji} {st.label}</span>
           </div>
-          <div style={{ display: "flex", gap: 12, marginTop: 4, flexWrap: "wrap", alignItems: "center" }}>
-            {lead.company && <span style={{ fontSize: 12, color: "#94a3b8" }}>🏢 {lead.company}</span>}
-            {lead.phone   && <span style={{ fontSize: 12, color: "#94a3b8", fontFamily: "var(--font-space-mono), monospace" }}>📱 {lead.phone}</span>}
+          {lead.company && <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 2 }}>🏢 {lead.company}</div>}
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 2 }}>
+            {lead.phone && <span style={{ fontSize: 12, color: "var(--text-muted)", fontFamily: "'Space Mono', monospace" }}>📱 {lead.phone}</span>}
+            {lead.place && <span style={{ fontSize: 12, color: "var(--text-muted)" }}>📍 {lead.place}</span>}
           </div>
-
-          {/* Caller badge — always shown for admin, shown for regular users too */}
-          {lead.calledBy && (
-            <div style={{ marginTop: 7 }}>
-              <span className="caller-chip" style={{ background: callerColor + "22", color: callerColor, border: `1px solid ${callerColor}44` }}>
-                <span style={{ width: 20, height: 20, borderRadius: "50%", background: callerColor, color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, flexShrink: 0 }}>
-                  {lead.calledBy[0].toUpperCase()}
-                </span>
-                📞 Called by <strong>{lead.calledBy}</strong>
+          
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8, flexWrap: "wrap", gap: 6 }}>
+            {lead.calledBy && (
+              <span className="caller-chip" style={{ background: cc + "22", color: cc, border: `1px solid ${cc}44` }}>
+                <Avatar name={lead.calledBy} size={18} />
+                {lead.calledBy}
               </span>
-            </div>
-          )}
-
-          {lead.followUpDate && (
-            <div style={{ fontSize: 12, marginTop: 5, color: overdue ? "#ef4444" : dueToday ? "#f97316" : "#60a5fa" }}>
-              📅 Follow-up: {formatDate(lead.followUpDate)}
-              {lead.lastCalled && <span style={{ color: "#6b7280", marginLeft: 10 }}>Last called: {formatDate(lead.lastCalled)}</span>}
-            </div>
-          )}
+            )}
+            {lead.followUpDate && (
+              <span style={{ fontSize: 11, color: overdue ? "var(--red)" : dueToday ? "var(--orange)" : "var(--text-dim)", fontWeight: 600, marginLeft: "auto" }}>
+                📅 {fmtDate(lead.followUpDate)}
+                {(overdue || dueToday) && (
+                  <span style={{ marginLeft: 4, background: overdue ? "var(--red)" : "var(--orange)", color: "#fff", fontSize: 9, padding: "1px 5px", borderRadius: 4, fontWeight: 800 }}>
+                    {overdue ? "OVERDUE" : "TODAY"}
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
         </div>
-
-        <div className="lead-actions">
-          <button className="btn" onClick={() => setExpanded(!expanded)} style={{ background: "#1e2240", color: "#94a3b8", padding: "6px 10px", fontSize: 12 }}>{expanded ? "▲" : "▼"}</button>
-          <button className="btn" onClick={() => onEdit(lead)} style={{ background: "#1e3a5f", color: "#60a5fa", padding: "6px 12px", fontSize: 12 }}>Edit</button>
-          <button className="btn" onClick={() => onDelete(lead.id)}
-            style={{ background: "#3d1a1a", color: "#f87171", padding: "6px 12px", fontSize: 12 }}>
-            ✕
-          </button>
+        
+        {/* Chevron */}
+        <div style={{ fontSize: 14, color: "var(--text-dim)", marginTop: 12 }}>
+          {expanded ? "▲" : "▼"}
         </div>
       </div>
 
+      {/* Expanded Actions & Details */}
       {expanded && (
-        <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #252840" }}>
-          {lead.notes && <div style={{ fontSize: 13, color: "#94a3b8", background: "#0f111a", borderRadius: 8, padding: "10px 14px", marginBottom: 12, lineHeight: 1.6 }}>📝 {lead.notes}</div>}
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <span style={{ fontSize: 12, color: "#4b5563", fontWeight: 600, alignSelf: "center" }}>Mark as:</span>
-            {Object.entries(STATUSES).map(([k, v]) => (
-              <button key={k} className="status-btn" onClick={() => onMarkStatus(lead.id, k)}
-                style={{ background: lead.status === k ? v.bg : "transparent", color: v.color, borderColor: v.color + "60" }}>
-                {v.label}
-              </button>
-            ))}
+        <div style={{ padding: "0 14px 14px" }}>
+          <div style={{ paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+            {lead.notes && (
+              <div style={{ fontSize: 13, color: "var(--text-muted)", background: "var(--bg-base)", borderRadius: 8, padding: "10px 12px", marginBottom: 12, lineHeight: 1.6 }}>
+                📝 {lead.notes}
+              </div>
+            )}
+            {lead.lastCalled && <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 10 }}>📞 Last called: {fmtDate(lead.lastCalled)}</div>}
+            
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12 }}>
+              <div style={{ flex: 1, minWidth: 200 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.6 }}>Mark Status:</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {Object.entries(STATUSES).map(([k, v]) => (
+                    <button key={k} className="status-btn" onClick={() => onMarkStatus(lead.id, k)}
+                      style={{ background: lead.status === k ? v.bg : "transparent", color: v.color, borderColor: v.color + "50" }}>
+                      {v.emoji} {v.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              
+              {/* Management Actions */}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn" onClick={() => onEdit(lead)} style={{ background: "#1e3a5f", color: "#60a5fa", padding: "6px 14px", fontSize: 12 }}>Edit Lead</button>
+                <button className="btn" onClick={() => onDelete(lead.id)} style={{ background: "rgba(239,68,68,0.12)", color: "var(--red)", padding: "6px 14px", fontSize: 12 }}>Delete</button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -648,115 +574,192 @@ function LeadCard({ lead, onEdit, onDelete, onMarkStatus, highlight }: {
 }
 
 /* ═══════════════════════════════════════════
-   LEAD FORM
+   TEAM REPORT
 ═══════════════════════════════════════════ */
+function TeamReport({ dbUsers, onDeleteUser }: { dbUsers: UserAccount[]; onDeleteUser: (name: string) => void }) {
+  const [teamLeads, setTeamLeads] = useState<Record<string, Lead[]>>({});
+  const [loading, setLoading] = useState(true);
 
-function LeadForm({ lead, currentUser, onSave, onClose }: {
-  lead: Lead | null, currentUser: UserAccount,
-  onSave: (l: Lead) => void, onClose: () => void
+  useEffect(() => {
+    const fetch = async () => {
+      const { data } = await insforge.database.from('leads').select();
+      const all = (data as DbLead[] || []).map(dbLeadToLead);
+      const byUser: Record<string, Lead[]> = {};
+      dbUsers.forEach(u => { byUser[u.name] = []; });
+      all.forEach(l => { if (byUser[l.calledBy] !== undefined) byUser[l.calledBy].push(l); });
+      setTeamLeads(byUser); setLoading(false);
+    };
+    fetch();
+  }, [dbUsers]);
+
+  if (loading) return <div className="empty-state"><div style={{ color: "var(--text-dim)", fontSize: 14 }}>Loading…</div></div>;
+
+  return (
+    <div>
+      <div className="section-title">📊 Team Performance</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {dbUsers.map(user => {
+          const ul = teamLeads[user.name] || [];
+          const converted = ul.filter(l => l.status === "converted").length;
+          const dueToday  = ul.filter(l => isDueToday(l.followUpDate) || (isOverdue(l.followUpDate) && l.status !== "converted" && l.status !== "dead")).length;
+          const color = avatarColor(user.name);
+          const rate = ul.length > 0 ? `${Math.round(converted / ul.length * 100)}%` : "—";
+          return (
+            <div key={user.name} className="card" style={{ borderLeft: `3px solid ${color}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                <Avatar name={user.name} size={44} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 700, fontSize: 16, color: "var(--text-primary)" }}>{user.name}</div>
+                  <div style={{ fontSize: 12, color: "var(--text-dim)" }}>Team Member</div>
+                </div>
+                <button onClick={() => onDeleteUser(user.name)}
+                  style={{ background: "rgba(239,68,68,0.12)", color: "var(--red)", border: "none", padding: "6px 10px", borderRadius: 8, fontSize: 12, cursor: "pointer", fontWeight: 700 }}>
+                  Remove
+                </button>
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {[
+                  { label: "Total",      val: ul.length, color: "#60a5fa" },
+                  { label: "Converted",  val: converted,  color: "#34d399" },
+                  { label: "Due Today",  val: dueToday,   color: "#f97316" },
+                  { label: "Conv. Rate", val: rate,        color: "#a78bfa" },
+                ].map(s => (
+                  <div key={s.label} className="team-stat">
+                    <div style={{ fontSize: 20, fontWeight: 800, color: s.color, fontFamily: "'Space Mono', monospace" }}>{s.val}</div>
+                    <div style={{ fontSize: 10, color: "var(--text-dim)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginTop: 2 }}>{s.label}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════
+   LEAD FORM — Bottom Sheet
+═══════════════════════════════════════════ */
+function LeadForm({ lead, currentUser, dbUsers, onSave, onClose }: {
+  lead: Lead | null; currentUser: UserAccount; dbUsers: UserAccount[];
+  onSave: (l: Lead) => void; onClose: () => void;
 }) {
   const [form, setForm] = useState({
     id: lead?.id || "", name: lead?.name || "", company: lead?.company || "",
-    phone: lead?.phone || "",
+    phone: lead?.phone || "", place: lead?.place || "",
     calledBy: lead?.calledBy || (currentUser.isAdmin ? "" : currentUser.name),
     status: lead?.status || "new",
     followUpDate: lead?.followUpDate || tomorrowStr(),
     notes: lead?.notes || "", lastCalled: lead?.lastCalled || "",
     createdAt: lead?.createdAt || todayStr(),
   });
-  const teamMembers = loadStoredUsers().filter(u => !u.isAdmin).map(u => u.name);
+  const teamMembers = dbUsers.map(u => u.name);
   const [customCaller, setCustomCaller] = useState(!teamMembers.includes(lead?.calledBy || "") && !!lead?.calledBy);
   const set = (k: string, v: string) => setForm(f => ({ ...f, [k]: v }));
 
   return (
-    <div className="overlay">
-      <div className="modal">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
-          <h2 style={{ fontFamily: "var(--font-space-mono), monospace", fontSize: 18, color: "#f1f5f9" }}>{lead ? "Edit Lead" : "Add New Lead"}</h2>
-          <button className="btn" onClick={onClose} style={{ background: "#252840", color: "#94a3b8", padding: "6px 12px", fontSize: 16 }}>✕</button>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div>
-            <label style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 6 }}>Client Full Name *</label>
-            <input className="input-field" placeholder="e.g. Rahul Sharma" value={form.name} onChange={e => set("name", e.target.value)} />
-          </div>
-          <div>
-            <label style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 6 }}>Company</label>
-            <input className="input-field" placeholder="e.g. TechSoft Solutions" value={form.company} onChange={e => set("company", e.target.value)} />
-          </div>
-          <div>
-            <label style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 6 }}>Phone Number *</label>
-            <input className="input-field" placeholder="e.g. 9876543210" value={form.phone} onChange={e => set("phone", e.target.value)} />
+    <div className="overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="sheet">
+        <div className="sheet-handle" />
+        <div className="sheet-inner">
+          {/* Header */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+            <div style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 17, color: "var(--text-primary)" }}>
+              {lead ? "✏️ Edit Lead" : "➕ Add Lead"}
+            </div>
+            <button className="btn" onClick={onClose} style={{ background: "var(--bg-raised)", color: "var(--text-muted)", padding: "8px 12px", fontSize: 15, borderRadius: 10 }}>✕</button>
           </div>
 
-          {/* WHO CALLED — admin can pick anyone, regular user is locked to themselves */}
-          <div>
-            <label style={{ fontSize: 12, fontWeight: 600, color: "#f97316", textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 8 }}>📞 Who Made This Call? *</label>
-            {currentUser.isAdmin ? (
-              // Admin: pick any team member
-              !customCaller ? (
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  {teamMembers.map(m => {
-                    const c = avatarColor(m); const sel = form.calledBy === m;
-                    return (
-                      <button key={m} type="button" className="btn" onClick={() => set("calledBy", m)}
-                        style={{ padding: "8px 16px", fontSize: 13, background: sel ? c : "#1e2240", color: sel ? "#fff" : "#94a3b8", border: `1.5px solid ${sel ? c : "#252840"}`, display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ width: 20, height: 20, borderRadius: "50%", background: sel ? "rgba(255,255,255,0.3)" : c, color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700 }}>{m[0]}</span>
-                        {m}
-                      </button>
-                    );
-                  })}
-                  <button type="button" className="btn" onClick={() => { setCustomCaller(true); set("calledBy", ""); }}
-                    style={{ padding: "8px 16px", fontSize: 13, background: "#1e2240", color: "#94a3b8", border: "1.5px dashed #374151" }}>
-                    + Other
-                  </button>
-                </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {/* Name */}
+            <div>
+              <label className="field-label">Client Name</label>
+              <input className="input-field" placeholder="e.g. Rahul Sharma" value={form.name} onChange={e => set("name", e.target.value)} />
+            </div>
+            {/* Company */}
+            <div>
+              <label className="field-label">Company</label>
+              <input className="input-field" placeholder="e.g. TechSoft Solutions" value={form.company} onChange={e => set("company", e.target.value)} />
+            </div>
+            {/* Phone */}
+            <div>
+              <label className="field-label">Phone *</label>
+              <input className="input-field" placeholder="e.g. 9876543210" value={form.phone} onChange={e => set("phone", e.target.value)} inputMode="tel" />
+            </div>
+            {/* Place */}
+            <div>
+              <label className="field-label">Which Place / Location</label>
+              <input className="input-field" placeholder="e.g. Mumbai, Andheri East" value={form.place} onChange={e => set("place", e.target.value)} />
+            </div>
+
+            {/* Who called */}
+            <div>
+              <label className="field-label" style={{ color: "var(--orange)" }}>📞 Who Made This Call? *</label>
+              {currentUser.isAdmin ? (
+                !customCaller ? (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {teamMembers.map(m => {
+                      const c = avatarColor(m); const sel = form.calledBy === m;
+                      return (
+                        <button key={m} type="button" className="btn" onClick={() => set("calledBy", m)}
+                          style={{ padding: "8px 12px", fontSize: 13, background: sel ? c + "33" : "var(--bg-raised)", color: sel ? c : "var(--text-muted)", border: `1.5px solid ${sel ? c : "var(--border)"}`, gap: 7 }}>
+                          <Avatar name={m} size={20} />
+                          {m}
+                        </button>
+                      );
+                    })}
+                    <button type="button" className="btn" onClick={() => { setCustomCaller(true); set("calledBy", ""); }}
+                      style={{ padding: "8px 14px", fontSize: 13, background: "var(--bg-raised)", color: "var(--text-dim)", border: "1.5px dashed var(--border)" }}>
+                      + Other
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input className="input-field" placeholder="Type caller name…" value={form.calledBy} onChange={e => set("calledBy", e.target.value)} autoFocus />
+                    <button type="button" className="btn" onClick={() => { setCustomCaller(false); set("calledBy", ""); }} style={{ background: "var(--bg-raised)", color: "var(--text-muted)", padding: "0 14px", flexShrink: 0 }}>↩</button>
+                  </div>
+                )
               ) : (
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input className="input-field" placeholder="Type caller name..." value={form.calledBy} onChange={e => set("calledBy", e.target.value)} autoFocus />
-                  <button type="button" className="btn" onClick={() => { setCustomCaller(false); set("calledBy", ""); }}
-                    style={{ background: "#252840", color: "#94a3b8", padding: "0 14px", flexShrink: 0 }}>↩</button>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, background: avatarColor(currentUser.name) + "18", border: `1.5px solid ${avatarColor(currentUser.name)}44`, borderRadius: 8, padding: "12px 14px" }}>
+                  <Avatar name={currentUser.name} size={28} />
+                  <span style={{ fontSize: 14, fontWeight: 700, color: avatarColor(currentUser.name) }}>{currentUser.name}</span>
+                  <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: "auto" }}>🔒 Locked to you</span>
                 </div>
-              )
-            ) : (
-              // Regular user: locked to themselves
-              <div style={{ display: "flex", alignItems: "center", gap: 10, background: avatarColor(currentUser.name) + "18", border: `1.5px solid ${avatarColor(currentUser.name)}44`, borderRadius: 8, padding: "10px 14px" }}>
-                <span style={{ width: 28, height: 28, borderRadius: "50%", background: avatarColor(currentUser.name), color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700 }}>
-                  {currentUser.name[0]}
-                </span>
-                <span style={{ fontSize: 14, fontWeight: 700, color: avatarColor(currentUser.name) }}>{currentUser.name}</span>
-                <span style={{ fontSize: 11, color: "#6b7280", marginLeft: "auto" }}>🔒 Locked to you</span>
+              )}
+            </div>
+
+            {/* Status + date */}
+            <div style={{ display: "flex", gap: 12 }}>
+              <div style={{ flex: 1 }}>
+                <label className="field-label">Status</label>
+                <select className="input-field" value={form.status} onChange={e => set("status", e.target.value)}>
+                  {Object.entries(STATUSES).map(([k, v]) => <option key={k} value={k}>{v.emoji} {v.label}</option>)}
+                </select>
               </div>
-            )}
-          </div>
-
-          <div style={{ display: "flex", gap: 12 }}>
-            <div style={{ flex: 1 }}>
-              <label style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 6 }}>Status</label>
-              <select className="input-field" value={form.status} onChange={e => set("status", e.target.value)}>
-                {Object.entries(STATUSES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-              </select>
+              <div style={{ flex: 1 }}>
+                <label className="field-label">Follow-up</label>
+                <input className="input-field" type="date" value={form.followUpDate} onChange={e => set("followUpDate", e.target.value)} />
+              </div>
             </div>
-            <div style={{ flex: 1 }}>
-              <label style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 6 }}>Follow-up Date</label>
-              <input className="input-field" type="date" value={form.followUpDate} onChange={e => set("followUpDate", e.target.value)} />
+
+            {/* Notes */}
+            <div>
+              <label className="field-label">Notes</label>
+              <textarea className="input-field" placeholder="What happened on the call?…" rows={3} value={form.notes} onChange={e => set("notes", e.target.value)} style={{ resize: "vertical" }} />
             </div>
-          </div>
 
-          <div>
-            <label style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 6 }}>Notes / Call Summary</label>
-            <textarea className="input-field" placeholder="What happened on the call? What did they say?..." rows={3} value={form.notes} onChange={e => set("notes", e.target.value)} style={{ resize: "vertical" }} />
-          </div>
-
-          <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-            <button className="btn" onClick={onClose} style={{ flex: 1, background: "#1e2240", color: "#94a3b8", padding: "12px" }}>Cancel</button>
-            <button className="btn" onClick={() => {
-              if (!form.name || !form.phone) return alert("Please fill Name and Phone");
-              if (!form.calledBy) return alert("Please select who made this call");
-              onSave(form as Lead);
-            }} style={{ flex: 2, background: "linear-gradient(135deg,#f97316,#ea580c)", color: "#fff", padding: "12px", fontSize: 15 }}>
-              {lead ? "Update Lead" : "Save Lead"} →
-            </button>
+            {/* Buttons */}
+            <div style={{ display: "flex", gap: 10 }}>
+              <button className="btn" onClick={onClose} style={{ flex: 1, background: "var(--bg-raised)", color: "var(--text-muted)", padding: "14px", borderRadius: 10 }}>Cancel</button>
+              <button className="btn" onClick={() => {
+                if (!form.phone) return alert("Please fill Phone number");
+                if (!form.calledBy) return alert("Please select who made this call");
+                onSave(form as Lead);
+              }} style={{ flex: 2, background: "linear-gradient(135deg,#f97316,#ea580c)", color: "#fff", padding: "14px", fontSize: 15, borderRadius: 10, boxShadow: "0 6px 20px rgba(249,115,22,0.3)" }}>
+                {lead ? "✓ Update Lead" : "✓ Save Lead"}
+              </button>
+            </div>
           </div>
         </div>
       </div>

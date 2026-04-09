@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { DM_Sans, Space_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -17,6 +17,16 @@ const spaceMono = Space_Mono({
 export const metadata: Metadata = {
   title: "CallTrack | Cold Call Command Center",
   description: "Advanced lead management and cold call tracking system for high-performance teams.",
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "CallTrack" },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  viewportFit: "cover",   // respects iPhone notch / safe-areas
+  themeColor: "#07090f",
 };
 
 export default function RootLayout({
